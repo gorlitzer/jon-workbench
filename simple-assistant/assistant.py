@@ -20,6 +20,76 @@ RECORD_SECONDS = 4
 SAMPLE_RATE = 16000
 CHUNK = 1024
 
+# === DYNAMIC MEMORY OPTIMIZATION ===
+# Models prioritized by quality first, memory requirement second
+PREFERRED_MODELS = [
+    {
+        "name": "qwen2.5:1.5b",
+        "gpu_layers": 15,
+        "context_size": 4096,
+        "memory_intensive": True,
+        "quality": "high"
+    },
+    {
+        "name": "qwen2.5:0.5b",
+        "gpu_layers": 10,
+        "context_size": 2048,
+        "memory_intensive": False,
+        "quality": "medium"
+    },
+    {
+        "name": "llama3.2:1b",
+        "gpu_layers": 5,
+        "context_size": 2048,
+        "memory_intensive": False,
+        "quality": "medium"
+    },
+    {
+        "name": "phi3:mini",
+        "gpu_layers": 0,  # CPU-only
+        "context_size": 1024,
+        "memory_intensive": False,
+        "quality": "basic"
+    }
+]
+
+# Dynamic fallback strategy based on available memory
+def get_available_memory_gb():
+    """Check available GPU memory (primary) with system RAM fallback"""
+    # Try GPU memory first (more relevant for AI model selection)
+    try:
+        import subprocess
+        # Use nvidia-smi to get GPU memory
+        result = subprocess.run(['nvidia-smi', '--query-gpu=memory.free', '--format=csv,noheader,nounits'],
+                              capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            gpu_memory_mb = int(result.stdout.strip().split('\n')[0])
+            gpu_memory_gb = gpu_memory_mb / 1024
+            print(f"🎮 GPU Memory Detected: {gpu_memory_gb:.1f}GB available")
+            return gpu_memory_gb
+    except:
+        pass  # Fall back to system memory if GPU check fails
+    
+    # Fallback: Check available system memory
+    try:
+        with open('/proc/meminfo', 'r') as f:
+            meminfo = f.read()
+            available_kb = int(meminfo.split('MemAvailable:')[1].split()[0])
+            return available_kb / 1024 / 1024  # Convert to GB
+    except:
+        return 4.0  # Default conservative estimate
+
+def select_model_for_memory():
+    """Select appropriate model based on available memory"""
+    available_gb = get_available_memory_gb()
+    
+    if available_gb > 6:
+        return PREFERRED_MODELS[:2]  # Use top 2 models
+    elif available_gb > 3:
+        return PREFERRED_MODELS[1:3]  # Use middle models
+    else:
+        return PREFERRED_MODELS[2:]  # Use lightweight models
+
 # === AUDIO SETUP ===
 p = pyaudio.PyAudio()
 stream = None
@@ -127,38 +197,28 @@ def list_audio_devices():
             print(f"   Device {i}: Error reading info - {e}")
 
 def find_best_input_device():
-    """Find the best available input device"""
+    """Find the best available input device for Jetson/Docker"""
     device_count = p.get_device_count()
+    print(f"🔍 Scanning {device_count} audio devices...")
     
     # Handle case where no devices are found at all
     if device_count <= 0:
         print("❌ No audio devices detected by PyAudio")
-        
-        # If PulseAudio is available, this might be normal in Docker
-        if check_pulseaudio_status():
-            print("🔄 PulseAudio backend detected - attempting fallback initialization")
-            # Try to create a default stream anyway (may work with PulseAudio)
-            return 0  # Use default device index
-        
         return None
     
-    # For Mac Docker with PulseAudio, prefer the default device
+    # First, try to get default input device (most reliable)
     try:
-        # Set PulseAudio-specific parameters for Mac Docker
-        os.environ['PA_ALSA_PLUGHW'] = '1'
-        
         default_input = p.get_default_input_device_info()
         print(f"🔍 Default input device: {default_input['name']}")
         
-        # Try default device first with PulseAudio-friendly settings
         if default_input['maxInputChannels'] > 0:
             try:
-                # For Mac Docker, use more compatible stream parameters
+                # Test default device with Jetson-friendly parameters
                 test_stream = p.open(format=pyaudio.paInt16,
                                    channels=1,
-                                   rate=16000,  # Use fixed rate for compatibility
+                                   rate=16000,
                                    input=True,
-                                   frames_per_buffer=512,
+                                   frames_per_buffer=1024,
                                    input_device_index=default_input['index'],
                                    start=False)
                 test_stream.close()
@@ -166,29 +226,19 @@ def find_best_input_device():
                 return default_input['index']
             except Exception as e:
                 print(f"❌ Default input device failed: {e}")
-                
-                # Fallback: try with different parameters
-                try:
-                    test_stream = p.open(format=pyaudio.paInt16,
-                                       channels=1,
-                                       rate=16000,
-                                       input=True,
-                                       frames_per_buffer=1024,
-                                       input=True_device_index=None)  # Use default
-                    test_stream.close()
-                    print(f"✅ Fallback input device works")
-                    return None  # Use None for default device
-                except Exception as fallback_e:
-                    print(f"❌ Fallback input device also failed: {fallback_e}")
     except Exception as e:
-        print(f"❌ Cannot get default input device info: {e}")
+        print(f"⚠️  Cannot get default input device: {e}")
     
-    # Try to find any working input device with Mac-friendly parameters
+    # Try all available input devices with simple test
+    working_devices = []
+    
     for i in range(device_count):
         try:
             device_info = p.get_device_info_by_index(i)
             if device_info['maxInputChannels'] > 0:
                 print(f"🔄 Testing device {i}: {device_info['name']}")
+                
+                # Simple test - just try to open the device
                 test_stream = p.open(format=pyaudio.paInt16,
                                    channels=1,
                                    rate=16000,
@@ -198,12 +248,18 @@ def find_best_input_device():
                                    start=False)
                 test_stream.close()
                 print(f"✅ Working input device found: {device_info['name']}")
-                return i
+                working_devices.append(i)
+                
         except Exception as e:
             print(f"❌ Device {i} failed: {e}")
             continue
     
-    return None
+    # Return the first working device, or None if none found
+    if working_devices:
+        return working_devices[0]
+    else:
+        print("⚠️  No working input devices found")
+        return None
 
 def start_pulseaudio_daemon():
     """Start PulseAudio daemon for Mac Docker Desktop"""
@@ -224,10 +280,9 @@ def start_pulseaudio_daemon():
         # Start PulseAudio daemon
         pulse_cmd = [
             'pulseaudio', '--daemonize=no', '--fail=true', '--log-level=debug',
-            '--disallow-exit', '--load-module=module-native-protocol-unix',
-            'socket=/tmp/pulse-runtime/native', '--exit-idle-time=-1', '--no-cork',
-            '--load-module=module-alsa-sink', 'device=default',
-            '--load-module=module-alsa-source', 'device=default', '--local'
+            '--disallow-exit', '--exit-idle-time=-1',
+            '--load-module', 'module-native-protocol-unix',
+            '--socket=/tmp/pulse-runtime/native'
         ]
         
         result = subprocess.run(pulse_cmd, capture_output=True, text=True)
@@ -252,33 +307,36 @@ def start_pulseaudio_daemon():
 def init_audio():
     global stream, audio_device_info
     
-    print("🔧 Initializing audio system...")
+    print("🔧 Initializing audio system for Jetson/Docker...")
     
-    # Try to start PulseAudio daemon for Mac Docker Desktop
-    pulseaudio_started = start_pulseaudio_daemon()
+    # For Jetson/Docker: Skip PulseAudio complexity and use direct ALSA
+    print("🔧 Using direct ALSA audio setup...")
     
-    # Check PulseAudio status
-    is_pulseaudio_running = check_pulseaudio_status()
-    
-    if is_pulseaudio_running:
-        print("🍎 Mac Docker detected - using PulseAudio backend")
-    
-    list_audio_devices()
-    
-    # Find best input device
-    input_device = find_best_input_device()
-    
-    if input_device is None and not is_pulseaudio_running:
-        raise RuntimeError("❌ No working audio input device found!")
+    # Set environment for better ALSA compatibility
+    os.environ['ALSA_PCM_CARD'] = '0'
+    os.environ['ALSA_PCM_DEVICE'] = '0'
     
     try:
-        # Use Mac-friendly stream parameters
+        list_audio_devices()
+    except Exception as e:
+        print(f"⚠️  Device listing failed: {e}")
+    
+    # Try to find working input device with Jetson-friendly parameters
+    input_device = find_best_input_device()
+    
+    # If no device found, try to proceed anyway (may work with system defaults)
+    if input_device is None:
+        print("⚠️  No specific device found, using system defaults...")
+        input_device = None
+    
+    try:
+        # Use Jetson/Docker compatible stream parameters
         stream_params = {
             'format': pyaudio.paInt16,
             'channels': 1,
-            'rate': 16000,  # Fixed rate for Mac compatibility
+            'rate': 16000,
             'input': True,
-            'frames_per_buffer': 512,
+            'frames_per_buffer': 1024,  # Larger buffer for stability
             'start': False
         }
         
@@ -286,13 +344,32 @@ def init_audio():
             stream_params['input_device_index'] = input_device
             
         stream = p.open(**stream_params)
-        audio_device_info = {'defaultSampleRate': 16000}  # Set fixed rate
+        audio_device_info = {'defaultSampleRate': 16000}
         
         print("✅ Audio stream initialized successfully!")
         
     except Exception as e:
         print(f"❌ Failed to open audio stream: {e}")
-        raise RuntimeError(f"❌ Failed to open audio stream: {e}")
+        print("🔄 Trying alternative configuration...")
+        
+        try:
+            # Fallback: Try with different parameters
+            stream_params = {
+                'format': pyaudio.paInt16,
+                'channels': 1,
+                'rate': 16000,
+                'input': True,
+                'frames_per_buffer': 512,
+                'input_device_index': None  # Use default
+            }
+            
+            stream = p.open(**stream_params)
+            audio_device_info = {'defaultSampleRate': 16000}
+            print("✅ Audio stream initialized with fallback settings!")
+            
+        except Exception as fallback_e:
+            print(f"❌ Fallback audio setup failed: {fallback_e}")
+            raise RuntimeError(f"❌ All audio initialization attempts failed: {e}, {fallback_e}")
 
 def record_audio():
     print("🎤 Listening...")
@@ -337,42 +414,68 @@ def speech_to_text():
             return ""
 
 def ask_llm(prompt):
-    payload = {
-        "model": "qwen2.5:1.5b",
-        "prompt": prompt,
-        "stream": False
-    }
+    # Get models based on available memory
+    available_models = select_model_for_memory()
+    
+    print(f"💾 Available memory: {get_available_memory_gb():.1f}GB")
+    print(f"🔄 Testing {len(available_models)} models based on memory constraints")
+    
+    for model_config in available_models:
+        model_name = model_config["name"]
+        gpu_layers = model_config["gpu_layers"]
+        context_size = model_config["context_size"]
+        quality = model_config["quality"]
+        
+        payload = {
+            "model": model_name,
+            "prompt": prompt,
+            "stream": False,
+            # Dynamic memory optimization based on model config
+            "options": {
+                "num_gpu_layers": gpu_layers,
+                "context_size": context_size,
+                "temperature": 0.7,
+                "top_p": 0.9,
+                # Memory management settings
+                "repeat_last_n": 64,
+                "repeat_penalty": 1.1,
+                "stop": ["</s>", "User:", "Assistant:"]
+            }
+        }
+        
+        try:
+            print(f"🤖 Testing {model_name} (GPU layers: {gpu_layers}, Context: {context_size}, Quality: {quality})")
+            r = requests.post(OLLAMA_URL, json=payload, timeout=30)
+            r.raise_for_status()
+            response = r.json().get("response", "").strip()
+            print(f"🤖 AI ({model_name}): {response}")
+            return response
+            
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 404:
+                print(f"⚠️ Model {model_name} not found, trying next...")
+                continue
+            elif e.response.status_code == 500:
+                print(f"⚠️ Model {model_name} failed (likely out of memory), trying next...")
+                continue
+            else:
+                print(f"⚠️ LLM Error with {model_name}: {e}")
+                continue
+        except Exception as e:
+            print(f"⚠️ Error with {model_name}: {e}")
+            continue
+    
+    # If all models fail, try to download the most lightweight one
     try:
-        r = requests.post(OLLAMA_URL, json=payload, timeout=30)
-        r.raise_for_status()
-        response = r.json().get("response", "").strip()
-        print(f"🤖 AI: {response}")
-        return response
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            print("🤖 AI model not found, downloading qwen2.5:1.5b...")
-            try:
-                # Download the model
-                pull_response = requests.post(f"http://{os.getenv('OLLAMA_HOST', 'ollama:11434')}/api/pull",
-                                            json={"name": "qwen2.5:1.5b"}, timeout=120)
-                pull_response.raise_for_status()
-                print("✅ AI model downloaded successfully!")
-                
-                # Retry the original request
-                r = requests.post(OLLAMA_URL, json=payload, timeout=30)
-                r.raise_for_status()
-                response = r.json().get("response", "").strip()
-                print(f"🤖 AI: {response}")
-                return response
-            except Exception as download_error:
-                print(f"Model download failed: {download_error}")
-                return "Sorry, I need to download the AI model first. Please try again in a moment."
-        else:
-            print(f"LLM Error: {e}")
-            return "Sorry, I couldn't think of an answer."
-    except Exception as e:
-        print(f"LLM Error: {e}")
-        return "Sorry, I couldn't think of an answer."
+        print("🤖 No models available, downloading phi3:mini (CPU-compatible)...")
+        pull_response = requests.post(f"http://{os.getenv('OLLAMA_HOST', 'ollama:11434')}/api/pull",
+                                    json={"name": "phi3:mini"}, timeout=120)
+        pull_response.raise_for_status()
+        print("✅ Downloaded phi3:mini successfully!")
+        return ask_llm(prompt)  # Retry with downloaded model
+    except Exception as download_error:
+        print(f"Model download failed: {download_error}")
+        return "Sorry, I'm having trouble loading the AI models. Please check memory availability and try again."
 
 def text_to_speech(text):
     try:
@@ -431,98 +534,51 @@ def main():
     print("🚀 Offline Voice Assistant Ready!")
     print("   Say: 'Hey assistant, [your question]'")
     
-    audio_mode = True
-    max_retry_attempts = 3
-    
-    for attempt in range(max_retry_attempts):
+    # Try to initialize audio with proper Jetson/Docker handling
+    for attempt in range(2):
         try:
-            print(f"🔧 Attempting audio initialization (attempt {attempt + 1}/{max_retry_attempts})...")
+            print(f"🔧 Initializing audio system (attempt {attempt + 1}/2)...")
             init_audio()
             print("✅ Audio system initialized successfully!")
             break
         except Exception as e:
             print(f"❌ Audio initialization failed: {e}")
-            if attempt < max_retry_attempts - 1:
-                print("🔄 Retrying in 2 seconds...")
+            if attempt == 0:
+                print("🔄 Retrying with simplified audio setup...")
                 time.sleep(2)
             else:
-                print("⚠️  All audio initialization attempts failed")
-                audio_mode = False
+                print("❌ Audio system unavailable - continuing with voice mode disabled")
+                print("⚠️  Note: This may be normal in headless Docker environments")
+                return
 
-    if audio_mode:
-        print("🎤 Starting VOICE MODE - listening for 'Hey assistant'...")
-        # Voice interaction mode
-        while True:
-            try:
-                audio_data = record_audio()
-                save_wav(audio_data)
-                text = speech_to_text()
+    # Voice interaction mode
+    print("🎤 Starting VOICE MODE - listening for 'Hey assistant'...")
+    while True:
+        try:
+            audio_data = record_audio()
+            save_wav(audio_data)
+            text = speech_to_text()
 
-                if text and any(ww in text for ww in WAKE_WORDS):
-                    question = text.split("assistant", 1)[-1].strip() or text
-                    if not question:
-                        question = "What can I help with?"
-                    response = ask_llm(question)
-                    text_to_speech(response)
-                else:
-                    print("⏳ No wake word — waiting...")
-                
-                time.sleep(1)
-            except KeyboardInterrupt:
-                print("\n👋 Goodbye!")
-                break
-            except Exception as e:
-                print(f"Error: {e}")
-                print("🔄 Continuing voice mode...")
-                time.sleep(1)
-
-        stream.stop_stream()
-        stream.close()
-    else:
-        # Fixed: Demo mode without stdin loops
-        print("\n" + "="*60)
-        print("🎤 OFFLINE VOICE ASSISTANT - SYSTEM STATUS")
-        print("="*60)
-        print("📋 CURRENT STATUS:")
-        print("   ❌ Voice mode: Audio not available in Docker")
-        print("   ✅ AI Backend: Ready and operational")
-        print("   🔄 Mode: Automated demo")
-        print()
-        print("🎬 RUNNING AI DEMONSTRATION")
-        print("="*60)
-        
-        # Demo questions - no stdin loops
-        demo_questions = [
-            "What time is it?",
-            "Explain quantum computing in simple terms",
-            "Tell me a short joke about programming",
-            "What can artificial intelligence help with?",
-            "How does machine learning work?"
-        ]
-        
-        # Execute demo without any input loops
-        for i, question in enumerate(demo_questions, 1):
-            print(f"\n📝 Question {i}/{len(demo_questions)}: {question}")
-            try:
+            if text and any(ww in text for ww in WAKE_WORDS):
+                question = text.split("assistant", 1)[-1].strip() or text
+                if not question:
+                    question = "What can I help with?"
                 response = ask_llm(question)
-                print(f"🤖 AI Response: {response}")
-            except Exception as e:
-                print(f"❌ Error: {e}")
+                text_to_speech(response)
+            else:
+                print("⏳ No wake word — waiting...")
             
-            if i < len(demo_questions):
-                print("⏱️  Next question in 2 seconds...")
-                time.sleep(2)
-                
-        print("\n" + "="*60)
-        print("✅ DEMO COMPLETED SUCCESSFULLY!")
-        print("="*60)
-        print("\n🎯 DEPLOYMENT READY:")
-        print("   ✅ AI backend working perfectly")
-        print("   ✅ Voice mode ready for Jetson Orin Nano 8GB")
-        print("   ✅ Docker containerization complete")
-        print("   ✅ Dynamic GPU/CPU detection active")
-        print("\n👋 Voice Assistant demo finished!")
-        print("="*60)
+            time.sleep(1)
+        except KeyboardInterrupt:
+            print("\n👋 Goodbye!")
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+            print("🔄 Continuing voice mode...")
+            time.sleep(1)
+
+    stream.stop_stream()
+    stream.close()
     
     p.terminate()
 

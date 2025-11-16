@@ -1,63 +1,115 @@
-# docker-compose.yml - Mac Docker Desktop with native audio support
+# docker-compose.yml - Jetson Orin Nano with GPU acceleration
+# Uses environment variables from .env file
 
 services:
   ollama:
     image: ollama/ollama:0.5.7
     container_name: ollama
     restart: unless-stopped
+    runtime: nvidia
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
       - ./ollama-entrypoint.sh:/entrypoint.sh:ro
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
-      - OLLAMA_KEEP_ALIVE=5m0s
-      - OLLAMA_MAX_LOADED_MODELS=2
-      - OLLAMA_NUM_PARALLEL=1
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
+      - OLLAMA_KEEP_ALIVE=${OLLAMA_KEEP_ALIVE}
+      - OLLAMA_MAX_LOADED_MODELS=${OLLAMA_MAX_LOADED_MODELS}
+      - OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL}
+      # Dynamic GPU/CPU offloading for Jetson Orin Nano
+      - OLLAMA_GPU_LAYERS=${OLLAMA_GPU_LAYERS}
+      - OLLAMA_GPU_MEMORY_FRACTION=${OLLAMA_GPU_MEMORY_FRACTION}
     entrypoint: ["/bin/sh", "/entrypoint.sh"]
 
   whisper:
     image: rhasspy/wyoming-whisper
     container_name: whisper
     restart: unless-stopped
+    runtime: nvidia
     ports:
       - "10300:10300"
-    command: --model base --language en
+    command: --model ${WHISPER_MODEL} --language ${WHISPER_LANGUAGE}
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_VISIBLE_DEVICES=${NVIDIA_VISIBLE_DEVICES}
 
   piper:
     image: rhasspy/wyoming-piper
     container_name: piper
     restart: unless-stopped
+    runtime: nvidia
     ports:
       - "10200:10200"
-    command: --voice en_US-lessac-medium
+    command: --voice ${PIPER_VOICE}
 
   assistant:
     build: .
     container_name: voice-assistant
     restart: unless-stopped
+    runtime: nvidia
     depends_on:
       - ollama
       - whisper
       - piper
-    # Mac Docker Desktop - rely on built-in audio forwarding
+    # Jetson Orin Nano ALSA audio device mapping (modern approach)
+    devices:
+      - /dev/snd:/dev/snd
+    # Audio group permissions for device access
+    group_add:
+      - "audio"
+    # Use default Docker bridge networking for container communication
     volumes:
       - /tmp/.asoundrc:/root/.asoundrc:ro
     environment:
-      - OLLAMA_HOST=ollama:11434
-      - WHISPER_HOST=whisper:10300
-      - PIPER_HOST=piper:10200
-      # Mac Docker Desktop audio environment
-      - AUDIODEV=default
-      - PYTHONPATH=/usr/local/lib/python3.11/site-packages
-      # Let Docker Desktop handle audio routing
-      - PULSE_SERVER=unix:${HOME}/.config/pulse/native
-      - XDG_RUNTIME_DIR=${HOME}/.config/pulse
-    network_mode: host
-    # Docker Desktop automatically bridges audio on macOS
+      - OLLAMA_HOST=${OLLAMA_HOST}
+      - WHISPER_HOST=${WHISPER_HOST}
+      - PIPER_HOST=${PIPER_HOST}
+      # Jetson Orin Nano audio environment
+      - AUDIODEV=${AUDIODEV}
+      - PYTHONPATH=${PYTHONPATH}
+      # PulseAudio for Docker container audio
+      - PULSE_SERVER=${PULSE_SERVER}
+      - XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR}
+      # ALSA configuration for Jetson
+      - ALSA_PCM_CARD=${ALSA_PCM_CARD}
+      - ALSA_PCM_DEVICE=${ALSA_PCM_DEVICE}
+      # Disable ALSA mixer controls that don't exist
+      - ALSA_MIXER_DEVICE=${ALSA_MIXER_DEVICE}
+    # Remove host networking - use default bridge networking
+    # This allows proper container-to-container communication
+
+  dashboard:
+    build: .
+    container_name: voice-dashboard
+    restart: unless-stopped
+    runtime: nvidia
+    depends_on:
+      - ollama
+      - whisper
+      - piper
+    ports:
+      - "5000:5000"
+    command: python web_dashboard.py
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./templates:/app/templates:ro
+    environment:
+      - FLASK_ENV=${FLASK_ENV}
+      - PYTHONPATH=${PYTHONPATH}
+      # Jetson audio environment for dashboard
+      - AUDIODEV=${AUDIODEV}
+      - ALSA_PCM_CARD=${ALSA_PCM_CARD}
+      - ALSA_PCM_DEVICE=${ALSA_PCM_DEVICE}
+      - ALSA_MIXER_DEVICE=${ALSA_MIXER_DEVICE}
+      # Service hosts for API calls
+      - OLLAMA_HOST=${OLLAMA_HOST}
+      - WHISPER_HOST=${WHISPER_HOST}
+      - PIPER_HOST=${PIPER_HOST}
+    # Jetson audio device mapping for dashboard
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - "audio"
 
 volumes:
   ollama_data:

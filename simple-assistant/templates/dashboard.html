@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Voice Assistant Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    animation: {
+                        'pulse-slow': 'pulse 2s infinite',
+                        'spin-slow': 'spin 1s linear infinite'
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        
+        .matrix-bg {
+            background: #000000;
+            background-image: 
+                radial-gradient(circle at 1px 1px, #00ff0015 1px, transparent 0);
+            background-size: 20px 20px;
+        }
+        
+        .terminal-text {
+            color: #00ff00;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .error-text {
+            color: #ff0040;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .warning-text {
+            color: #ffff00;
+            font-family: 'Courier New', monospace;
+        }
+        
+        .loading {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border: 1px solid #333;
+            border-top: 1px solid #00ff00;
+            animation: spin 1s linear infinite;
+        }
+        
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+        
+        .blink {
+            animation: blink 1s infinite;
+        }
+        
+        .hacker-box {
+            background: #0a0a0a;
+            border: 1px solid #333;
+            border-radius: 0;
+        }
+        
+        .hacker-box:hover {
+            background: #111111;
+        }
+        
+        .status-green {
+            color: #00ff00;
+        }
+        
+        .status-red {
+            color: #ff0040;
+        }
+        
+        .status-yellow {
+            color: #ffff00;
+        }
+    </style>
+</head>
+<body class="matrix-bg min-h-screen">
+    <div class="max-w-7xl mx-auto p-5">
+        <!-- Tab Navigation -->
+        <div class="terminal-text mb-6 p-4 hacker-box flex justify-center space-x-4">
+            <button onclick="switchTab('dashboard')" id="dashboardTab" class="px-6 py-2 border border-green-400 text-green-400 bg-green-400 bg-opacity-20 terminal-text hover:bg-opacity-30">
+                DASHBOARD
+            </button>
+            <button onclick="switchTab('logs')" id="logsTab" class="px-6 py-2 border border-gray-400 text-gray-400 terminal-text hover:bg-gray-400 hover:bg-opacity-20">
+                LOGS
+            </button>
+        </div>
+        
+        <!-- Dashboard View -->
+        <div id="dashboardView">
+        <!-- Header -->
+        <div class="terminal-text mb-8 p-4 hacker-box">
+            <div class="text-center">
+                <h1 class="text-4xl font-bold mb-2">root@voice-assistant:~$</h1>
+                <div class="text-sm mt-2">
+                    <span class="text-green-400">SYSTEM ONLINE</span> |
+                    <span class="text-yellow-400" id="currentTime"></span> |
+                    <span class="text-green-400">UPTIME: <span id="uptime">00:00:00</span></span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- System Status -->
+        <div class="hacker-box p-6 mb-6">
+            <div class="flex justify-between items-center mb-6">
+                <h2 class="text-xl font-bold terminal-text">[ SYSTEM STATUS ]</h2>
+                <button onclick="refreshStatus()" class="bg-transparent border border-green-400 text-green-400 px-4 py-2 terminal-text text-sm hover:bg-green-400 hover:text-black">REFRESH</button>
+            </div>
+            <div class="grid grid-cols-2 md:grid-cols-4 gap-4" id="statusGrid">
+                <div class="p-4 hacker-box">
+                    <div class="terminal-text font-semibold mb-2">OLLAMA_AI</div>
+                    <div class="text-lg mt-1 terminal-text" id="ollamaStatus">INIT...</div>
+                </div>
+                <div class="p-4 hacker-box">
+                    <div class="terminal-text font-semibold mb-2">MODELS</div>
+                    <div class="text-lg mt-1 terminal-text" id="modelCount">-</div>
+                </div>
+                <div class="p-4 hacker-box">
+                    <div class="terminal-text font-semibold mb-2">AUDIO_DEV</div>
+                    <div class="text-lg mt-1 terminal-text" id="audioDevices">-</div>
+                </div>
+                <div class="p-4 hacker-box">
+                    <div class="terminal-text font-semibold mb-2">ASSISTANT</div>
+                    <div class="text-lg mt-1 terminal-text" id="assistantStatus">INIT...</div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Container Status -->
+        <div class="grid md:grid-cols-2 gap-6 mb-6">
+            <div class="hacker-box p-6">
+                <h2 class="text-xl font-bold terminal-text mb-6">[ CONTAINERS ]</h2>
+                <div id="containerStatus" class="space-y-3">
+                    <div class="flex justify-between items-center p-3 hacker-box">
+                        <span class="terminal-text font-semibold">OLLAMA</span>
+                        <span class="terminal-text font-medium" id="ollamaContainer">SCAN...</span>
+                    </div>
+                    <div class="flex justify-between items-center p-3 hacker-box">
+                        <span class="terminal-text font-semibold">WHISPER_STT</span>
+                        <span class="terminal-text font-medium" id="whisperContainer">SCAN...</span>
+                    </div>
+                    <div class="flex justify-between items-center p-3 hacker-box">
+                        <span class="terminal-text font-semibold">PIPER_TTS</span>
+                        <span class="terminal-text font-medium" id="piperContainer">SCAN...</span>
+                    </div>
+                    <div class="flex justify-between items-center p-3 hacker-box">
+                        <span class="terminal-text font-semibold">VOICE_ASSISTANT</span>
+                        <span class="terminal-text font-medium" id="assistantContainer">SCAN...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Assistant Controls -->
+            <div class="hacker-box p-6">
+                <h2 class="text-xl font-bold terminal-text mb-6">[ CONTROLS ]</h2>
+                <div class="text-center mb-6 p-5 hacker-box" id="assistantControlStatus">
+                    <span class="inline-block w-3 h-3 bg-red-500 mr-3 blink"></span>
+                    <span class="terminal-text font-medium">ASSISTANT: INACTIVE</span>
+                </div>
+                <div class="text-center space-x-4">
+                    <button class="bg-transparent border border-green-400 text-green-400 px-6 py-3 terminal-text hover:bg-green-400 hover:text-black" onclick="startAssistant()" id="startAssistantBtn">START</button>
+                    <button class="bg-transparent border border-red-400 text-red-400 px-6 py-3 terminal-text hover:bg-red-400 hover:text-black" onclick="stopAssistant()" id="stopAssistantBtn">STOP</button>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Testing Section -->
+        <div class="grid md:grid-cols-2 gap-6 mb-6">
+            <!-- Audio Testing -->
+            <div class="hacker-box p-6">
+                <h2 class="text-xl font-bold terminal-text mb-6">[ AUDIO_TESTS ]</h2>
+                <div class="grid grid-cols-1 gap-6">
+                    <div>
+                        <h3 class="terminal-text font-semibold mb-3">MICROPHONE</h3>
+                        <button class="w-full bg-transparent border border-blue-400 text-blue-400 px-6 py-3 terminal-text hover:bg-blue-400 hover:text-black" onclick="testMicrophone()">TEST_MIC</button>
+                        <div class="test-result hidden mt-4 terminal-text" id="microphoneResult"></div>
+                    </div>
+                    <div>
+                        <h3 class="terminal-text font-semibold mb-3">SPEAKER</h3>
+                        <button class="w-full bg-transparent border border-blue-400 text-blue-400 px-6 py-3 terminal-text hover:bg-blue-400 hover:text-black" onclick="testSpeaker()">TEST_SPEAKER</button>
+                        <div class="test-result hidden mt-4 terminal-text" id="speakerResult"></div>
+                    </div>
+                    <div>
+                        <h3 class="terminal-text font-semibold mb-3">STT_PIPELINE</h3>
+                        <p class="text-sm text-gray-400 mb-3">RECORD → TRANSCRIBE → DISPLAY</p>
+                        <button class="w-full bg-transparent border border-purple-400 text-purple-400 px-6 py-3 terminal-text hover:bg-purple-400 hover:text-black" onclick="testSTT()">TEST_STT</button>
+                        <div class="test-result hidden mt-4 terminal-text" id="sttTestResult"></div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- AI Testing -->
+            <div class="hacker-box p-6">
+                <h2 class="text-xl font-bold terminal-text mb-6">[ AI_TESTS ]</h2>
+                <button class="w-full bg-transparent border border-yellow-400 text-yellow-400 px-6 py-3 terminal-text hover:bg-yellow-400 hover:text-black mb-4" onclick="testOllama()">TEST_OLLAMA</button>
+                <div class="test-result hidden terminal-text" id="ollamaTestResult"></div>
+            </div>
+        </div>
+        </div>
+        <!-- End Dashboard View -->
+        
+        <!-- Logs View -->
+        <div id="logsView" class="hidden">
+            <div class="grid grid-cols-12 gap-6">
+                <!-- Left Sidebar - Container Selection -->
+                <div class="col-span-3">
+                    <div class="hacker-box p-6">
+                        <h2 class="text-xl font-bold terminal-text mb-6">[ CONTAINERS ]</h2>
+                        <div class="space-y-2">
+                            <button onclick="selectContainer('all')" id="container-all" class="w-full text-left px-4 py-3 border border-green-400 bg-green-400 bg-opacity-20 text-green-400 terminal-text hover:bg-opacity-30">
+                                <span class="font-bold">▶</span> ALL
+                            </button>
+                            <button onclick="selectContainer('ollama')" id="container-ollama" class="w-full text-left px-4 py-3 border border-gray-600 text-gray-400 terminal-text hover:border-green-400 hover:text-green-400">
+                                <span class="font-bold">▶</span> OLLAMA
+                            </button>
+                            <button onclick="selectContainer('whisper')" id="container-whisper" class="w-full text-left px-4 py-3 border border-gray-600 text-gray-400 terminal-text hover:border-green-400 hover:text-green-400">
+                                <span class="font-bold">▶</span> WHISPER_STT
+                            </button>
+                            <button onclick="selectContainer('piper')" id="container-piper" class="w-full text-left px-4 py-3 border border-gray-600 text-gray-400 terminal-text hover:border-green-400 hover:text-green-400">
+                                <span class="font-bold">▶</span> PIPER_TTS
+                            </button>
+                            <button onclick="selectContainer('assistant')" id="container-assistant" class="w-full text-left px-4 py-3 border border-gray-600 text-gray-400 terminal-text hover:border-green-400 hover:text-green-400">
+                                <span class="font-bold">▶</span> VOICE_ASSISTANT
+                            </button>
+                        </div>
+                        
+                        <!-- Log Controls -->
+                        <div class="mt-6 pt-6 border-t border-gray-700">
+                            <h3 class="text-sm font-bold terminal-text mb-3">[ CONTROLS ]</h3>
+                            <div class="space-y-2">
+                                <button onclick="refreshCurrentLogs()" class="w-full bg-transparent border border-blue-400 text-blue-400 px-4 py-2 terminal-text text-sm hover:bg-blue-400 hover:text-black">
+                                    REFRESH
+                                </button>
+                                <button onclick="clearLogsDisplay()" class="w-full bg-transparent border border-yellow-400 text-yellow-400 px-4 py-2 terminal-text text-sm hover:bg-yellow-400 hover:text-black">
+                                    CLEAR
+                                </button>
+                                <button onclick="toggleAutoRefresh()" id="autoRefreshBtn" class="w-full bg-transparent border border-green-400 text-green-400 px-4 py-2 terminal-text text-sm hover:bg-green-400 hover:text-black">
+                                    AUTO: ON
+                                </button>
+                            </div>
+                            
+                            <!-- Lines selector -->
+                            <div class="mt-4">
+                                <label class="text-xs terminal-text mb-2 block">LINES:</label>
+                                <select id="logLinesSelect" onchange="refreshCurrentLogs()" class="w-full bg-black border border-gray-600 text-green-400 terminal-text px-3 py-2 text-sm">
+                                    <option value="20">20</option>
+                                    <option value="50" selected>50</option>
+                                    <option value="100">100</option>
+                                    <option value="200">200</option>
+                                    <option value="500">500</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Panel - Logs Display -->
+                <div class="col-span-9">
+                    <div class="hacker-box p-6">
+                        <div class="flex justify-between items-center mb-6">
+                            <h2 class="text-xl font-bold terminal-text">[ <span id="currentContainerTitle">ALL CONTAINERS</span> ]</h2>
+                            <div class="terminal-text text-sm">
+                                <span class="text-gray-400">LAST UPDATE: </span>
+                                <span class="text-green-400" id="lastLogUpdate">--:--:--</span>
+                            </div>
+                        </div>
+                        <div class="hacker-box p-4 h-[600px] overflow-y-auto font-mono text-xs" id="logsDisplayContainer">
+                            <div id="logsDisplay" class="terminal-text space-y-1">
+                                <div class="text-green-400">[SYSTEM] Logs viewer initialized. Select a container to view logs.</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <!-- End Logs View -->
+    </div>
+
+    <!-- External JavaScript -->
+    <script src="/static/dashboard.js"></script>
+</body>
+</html>
