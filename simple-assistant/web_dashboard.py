@@ -15,14 +15,214 @@ import pyaudio
 import wave
 import struct
 import math
+import tempfile
 from threading import Thread
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 docker_client = docker.from_env()
 
 # Global state
 assistant_running = False
 audio_test_results = {}
+
+def communicate_with_wyoming_piper(text, host='piper', port=10200, timeout=10):
+    """
+    Communicate with Piper TTS service using Wyoming protocol
+    Returns audio data as bytes, or None if failed
+    """
+    import socket
+    
+    try:
+        # Create Wyoming protocol message for SPEAK command
+        # Format: "SPEAK <text_length>\n\n<text>"
+        message_data = text.encode('utf-8')
+        message_header = f"SPEAK {len(message_data)}\n\n".encode('utf-8')
+        full_message = message_header + message_data
+        
+        # Connect to Piper via Wyoming protocol
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.settimeout(timeout)
+        sock.connect((host, port))
+        
+        # Send the message
+        sock.sendall(full_message)
+        
+        # Receive audio data
+        audio_data = b''
+        while True:
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                audio_data += chunk
+            except socket.timeout:
+                break
+        
+        sock.close()
+        
+        # Check if we got audio data
+        if len(audio_data) < 44:  # Minimum WAV header size
+            raise Exception(f"Insufficient audio data received: {len(audio_data)} bytes")
+            
+        return audio_data
+        
+    except Exception as e:
+        print(f"Wyoming protocol error: {e}")
+        return None
+
+class WhisperServiceController:
+    def __init__(self):
+        self.process = None
+        self.service_enabled = False
+        self.last_health_check = None
+        self.memory_threshold = 0.8  # 80% GPU memory usage threshold
+        
+    def start_whisper_service(self, force=False):
+        """Start Whisper service with memory optimization"""
+        try:
+            # Check memory usage if not forced
+            if not force:
+                if self.get_gpu_memory_usage() > self.memory_threshold:
+                    print("GPU memory usage too high, skipping Whisper startup")
+                    return False
+            
+            # Stop existing service if running
+            self.stop_whisper_service()
+            
+            # Start Whisper container with optimized settings
+            self.process = subprocess.Popen([
+                'docker', 'run', '-d',
+                '--name', 'whisper-dynamic',
+                '--rm',
+                '--runtime', 'nvidia',
+                '-p', '10300:10300',
+                '-e', 'NVIDIA_VISIBLE_DEVICES=all',
+                '-e', f'WHISPER_MODEL={os.getenv("WHISPER_MODEL", "base")}',
+                '-e', f'WHISPER_LANGUAGE={os.getenv("WHISPER_LANGUAGE", "en")}',
+                'rhasspy/wyoming-whisper'
+            ], cwd='/app')
+            
+            self.service_enabled = True
+            print("Whisper service started dynamically")
+            return True
+            
+        except Exception as e:
+            print(f"Failed to start Whisper service: {e}")
+            self.service_enabled = False
+            return False
+    
+    def stop_whisper_service(self):
+        """Stop Whisper service and free GPU memory"""
+        try:
+            if self.process:
+                self.process.terminate()
+                self.process.wait(timeout=10)
+                self.process = None
+            
+            # Stop and remove dynamic container
+            subprocess.run(['docker', 'stop', 'whisper-dynamic'],
+                         capture_output=True, timeout=10)
+            subprocess.run(['docker', 'rm', 'whisper-dynamic'],
+                         capture_output=True, timeout=10)
+            
+            self.service_enabled = False
+            print("Whisper service stopped and memory freed")
+            return True
+            
+        except Exception as e:
+            print(f"Error stopping Whisper service: {e}")
+            return False
+    
+    def is_whisper_running(self):
+        """Check if Whisper service is running"""
+        try:
+            # Check if dynamic container is running
+            result = subprocess.run([
+                'docker', 'ps', '--filter', 'name=whisper-dynamic', '--format', '{{.Names}}'
+            ], capture_output=True, text=True)
+            
+            return 'whisper-dynamic' in result.stdout.strip()
+            
+        except Exception:
+            return False
+    
+    def get_whisper_status(self):
+        """Get detailed Whisper service status"""
+        try:
+            # Check running status
+            running = self.is_whisper_running()
+            
+            # Check health endpoint if running
+            health_status = "unknown"
+            if running:
+                try:
+                    response = requests.get('http://whisper-dynamic:10300/api/info', timeout=3)
+                    if response.status_code == 200:
+                        health_status = "healthy"
+                    else:
+                        health_status = "unhealthy"
+                except:
+                    health_status = "unreachable"
+            
+            # Get model info
+            model = os.getenv('WHISPER_MODEL', 'unknown')
+            language = os.getenv('WHISPER_LANGUAGE', 'unknown')
+            
+            return {
+                'running': running,
+                'enabled': self.service_enabled,
+                'health': health_status,
+                'model': model,
+                'language': language,
+                'last_check': self.last_health_check,
+                'memory_threshold': self.memory_threshold
+            }
+            
+        except Exception as e:
+            return {
+                'running': False,
+                'enabled': self.service_enabled,
+                'health': 'error',
+                'error': str(e),
+                'model': 'unknown',
+                'language': 'unknown'
+            }
+    
+    def get_gpu_memory_usage(self):
+        """Get current GPU memory usage percentage"""
+        try:
+            result = subprocess.run(['nvidia-smi', '--query-gpu=memory.used,memory.total',
+                                   '--format=csv,noheader,nounits'],
+                                  capture_output=True, text=True, timeout=5)
+            
+            if result.returncode == 0:
+                lines = result.stdout.strip().split('\n')
+                memory_used = int(lines[0].split(',')[0].strip())
+                memory_total = int(lines[0].split(',')[1].strip())
+                return memory_used / memory_total if memory_total > 0 else 0
+            return 0
+        except:
+            return 0
+    
+    def health_check(self):
+        """Perform health check and update last_health_check"""
+        try:
+            self.last_health_check = time.time()
+            status = self.get_whisper_status()
+            
+            # Auto-start if enabled but not running
+            if self.service_enabled and not status['running']:
+                print("Whisper service enabled but not running, attempting restart...")
+                return self.start_whisper_service()
+            
+            return status
+            
+        except Exception as e:
+            print(f"Whisper health check failed: {e}")
+            return {'running': False, 'health': 'error', 'error': str(e)}
+
+# Initialize controllers
+whisper_controller = WhisperServiceController()
 
 class AssistantController:
     def __init__(self):
@@ -133,66 +333,77 @@ def get_status():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
-@app.route('/api/test/microphone', methods=['POST'])
-def test_microphone():
-    """Test microphone functionality with detailed feedback"""
+@app.route('/api/test/tts', methods=['POST'])
+def test_tts():
+    """Test TTS (Text-to-Speech) functionality with detailed feedback"""
     start_time = time.time()
     try:
-        import tempfile
-        import os
+        # Test Piper TTS service connectivity first
+        tts_start = time.time()
+        test_text = "This is a test of the text to speech system. The microphone is working correctly."
         
-        # Record audio for 3 seconds for better testing
-        print("Recording audio for microphone test...")
-        audio_data = record_audio()
-        
-        if not audio_data:
-            return jsonify({'success': False, 'error': 'No audio data recorded'}), 500
-        
-        # Calculate audio statistics
-        duration = len(audio_data) / (16000 * 2)  # Sample rate * bytes per sample
-        sample_count = len(audio_data) // 2  # 16-bit samples
-        max_amplitude = max(abs(int.from_bytes(audio_data[i:i+2], 'little', signed=True)) for i in range(0, len(audio_data), 2))
-        avg_amplitude = sum(abs(int.from_bytes(audio_data[i:i+2], 'little', signed=True)) for i in range(0, len(audio_data), 2)) / sample_count if sample_count > 0 else 0
-        
-        # Save to temp file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-            save_wav(audio_data, tmp_file.name)
-            temp_file_path = tmp_file.name
+        # Try Wyoming protocol (Piper TTS standard)
+        try:
+            audio_data = communicate_with_wyoming_piper(test_text)
+            if not audio_data:
+                raise Exception("No audio data received from Wyoming protocol")
+        except Exception as wyoming_error:
+            print(f"Wyoming protocol failed: {wyoming_error}")
             
+            # Try HTTP API as fallback (for older Piper versions)
+            try:
+                response = requests.post('http://piper:10200/speak',
+                                        json={"text": test_text},
+                                        timeout=5)
+                response.raise_for_status()
+                audio_data = response.content
+            except Exception as http_error:
+                end_time = time.time()
+                execution_time = end_time - start_time
+                
+                return jsonify({
+                    'success': False,
+                    'error': f'TTS service unavailable: {str(wyoming_error)}, HTTP fallback also failed: {str(http_error)}',
+                    'execution_time': round(execution_time, 3)
+                }), 500
+        
+        tts_end = time.time()
+        tts_time = tts_end - tts_start
+        
+        # Save audio data to temporary file and play it
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
+            tmp_file.write(audio_data)
+            temp_audio_path = tmp_file.name
+        
+        # Play the generated audio
+        play_test_tts_audio(temp_audio_path)
+        
+        # Clean up temp file
+        os.unlink(temp_audio_path)
+        
         end_time = time.time()
         execution_time = end_time - start_time
         
-        audio_test_results['microphone'] = {
-            'success': True,
-            'duration': duration,
-            'execution_time': execution_time,
-            'sample_count': sample_count,
-            'max_amplitude': max_amplitude,
-            'avg_amplitude': round(avg_amplitude, 2),
-            'audio_size_bytes': len(audio_data),
-            'temp_file': temp_file_path
-        }
-        
         return jsonify({
             'success': True,
-            'message': f'Microphone test completed successfully',
+            'message': 'TTS test completed successfully',
             'execution_time': round(execution_time, 3),
-            'audio_stats': {
-                'duration_seconds': round(duration, 3),
-                'sample_count': sample_count,
-                'max_amplitude': max_amplitude,
-                'avg_amplitude': round(avg_amplitude, 2),
-                'audio_size_bytes': len(audio_data),
-                'quality_score': round((max_amplitude / 32768) * 100, 1) if max_amplitude > 0 else 0
+            'test_response': f'Generated speech for: "{test_text}"',
+            'timing_breakdown': {
+                'tts_generation_time': round(tts_time, 3),
+                'total_time': round(execution_time, 3)
             },
-            'recorded_message': f'Captured {sample_count} audio samples with peak amplitude of {max_amplitude}'
+            'played_message': f'Successfully generated and played TTS audio in {tts_time:.2f} seconds'
         })
         
     except Exception as e:
         end_time = time.time()
         execution_time = end_time - start_time
-        audio_test_results['microphone'] = {'success': False, 'error': str(e), 'execution_time': execution_time}
-        return jsonify({'success': False, 'error': str(e), 'execution_time': round(execution_time, 3)}), 500
+        return jsonify({
+            'success': False,
+            'error': f'TTS test failed: {str(e)}',
+            'execution_time': round(execution_time, 3)
+        }), 500
 
 @app.route('/api/test/speaker', methods=['POST'])
 def test_speaker():
@@ -242,119 +453,6 @@ def test_speaker():
         end_time = time.time()
         execution_time = end_time - start_time
         audio_test_results['speaker'] = {'success': False, 'error': str(e), 'execution_time': execution_time}
-        return jsonify({'success': False, 'error': str(e), 'execution_time': round(execution_time, 3)}), 500
-
-@app.route('/api/test/stt', methods=['POST'])
-def test_stt():
-    """Test Speech-to-Text functionality with detailed feedback"""
-    start_time = time.time()
-    try:
-        import tempfile
-        import subprocess
-        import json
-        
-        # Record audio for 4 seconds (longer for better STT)
-        print("Recording audio for STT test...")
-        record_start = time.time()
-        audio_data = record_audio_for_stt()
-        record_end = time.time()
-        record_time = record_end - record_start
-        
-        if not audio_data:
-            return jsonify({'success': False, 'error': 'No audio recorded'}), 500
-        
-        # Calculate audio statistics
-        audio_duration = len(audio_data) / (16000 * 2)
-        sample_count = len(audio_data) // 2
-        max_amplitude = max(abs(int.from_bytes(audio_data[i:i+2], 'little', signed=True)) for i in range(0, len(audio_data), 2))
-        
-        # Save audio to temporary WAV file
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp_file:
-            save_wav(audio_data, tmp_file.name)
-            temp_wav_path = tmp_file.name
-        
-        # Send audio to Whisper service via Wyoming protocol
-        transcription_start = time.time()
-        try:
-            # Test Whisper connectivity first
-            whisper_response = requests.get('http://whisper:10300/api/info', timeout=5)
-            if whisper_response.status_code != 200:
-                return jsonify({'success': False, 'error': 'Whisper service not accessible'}), 500
-            
-            # Try transcription using Whisper
-            transcription_result = transcribe_with_whisper(temp_wav_path)
-            transcription_end = time.time()
-            transcription_time = transcription_end - transcription_start
-            
-            # Clean up temp file
-            os.unlink(temp_wav_path)
-            
-            # Calculate tokens and statistics
-            transcription_text = transcription_result.get('text', '').strip()
-            word_count = len(transcription_text.split()) if transcription_text else 0
-            char_count = len(transcription_text)
-            confidence_score = transcription_result.get('confidence', 0.0)
-            
-            end_time = time.time()
-            total_execution_time = end_time - start_time
-            
-            return jsonify({
-                'success': True,
-                'message': 'STT test completed successfully',
-                'execution_time': round(total_execution_time, 3),
-                'transcription': transcription_text if transcription_text else 'No clear speech detected',
-                'transcription_stats': {
-                    'word_count': word_count,
-                    'character_count': char_count,
-                    'confidence_score': round(confidence_score, 3),
-                    'words_per_second': round(word_count / audio_duration, 2) if audio_duration > 0 else 0
-                },
-                'audio_stats': {
-                    'duration_seconds': round(audio_duration, 3),
-                    'sample_count': sample_count,
-                    'max_amplitude': max_amplitude,
-                    'audio_size_bytes': len(audio_data)
-                },
-                'timing_breakdown': {
-                    'recording_time': round(record_time, 3),
-                    'transcription_time': round(transcription_time, 3),
-                    'total_time': round(total_execution_time, 3)
-                },
-                'recorded_message': f'Processed {word_count} words from {audio_duration:.2f}s of audio with {confidence_score:.1%} confidence'
-            })
-            
-        except Exception as whisper_error:
-            transcription_end = time.time()
-            transcription_time = transcription_end - transcription_start
-            
-            # Clean up temp file on error
-            try:
-                os.unlink(temp_wav_path)
-            except:
-                pass
-            
-            end_time = time.time()
-            total_execution_time = end_time - start_time
-            
-            return jsonify({
-                'success': False,
-                'error': f'STT processing failed: {str(whisper_error)}',
-                'execution_time': round(total_execution_time, 3),
-                'timing_breakdown': {
-                    'recording_time': round(record_time, 3),
-                    'transcription_time': round(transcription_time, 3),
-                    'total_time': round(total_execution_time, 3)
-                },
-                'audio_stats': {
-                    'duration_seconds': round(audio_duration, 3),
-                    'sample_count': sample_count,
-                    'max_amplitude': max_amplitude
-                }
-            }), 500
-        
-    except Exception as e:
-        end_time = time.time()
-        execution_time = end_time - start_time
         return jsonify({'success': False, 'error': str(e), 'execution_time': round(execution_time, 3)}), 500
 
 @app.route('/api/test/ollama', methods=['POST'])
@@ -452,6 +550,54 @@ def stop_assistant():
     success = controller.stop_assistant()
     return jsonify({'success': success})
 
+# Whisper Service Management Endpoints
+@app.route('/api/whisper/start', methods=['POST'])
+def start_whisper():
+    """Start Whisper service dynamically"""
+    try:
+        force = request.json.get('force', False) if request.json else False
+        success = whisper_controller.start_whisper_service(force=force)
+        return jsonify({'success': success, 'message': 'Whisper service started' if success else 'Failed to start Whisper service'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/whisper/stop', methods=['POST'])
+def stop_whisper():
+    """Stop Whisper service and free memory"""
+    try:
+        success = whisper_controller.stop_whisper_service()
+        return jsonify({'success': success, 'message': 'Whisper service stopped' if success else 'Failed to stop Whisper service'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/whisper/enable', methods=['POST'])
+def enable_whisper():
+    """Enable Whisper service for auto-start"""
+    try:
+        whisper_controller.service_enabled = True
+        return jsonify({'success': True, 'message': 'Whisper service enabled for auto-start'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/whisper/disable', methods=['POST'])
+def disable_whisper():
+    """Disable Whisper service for auto-start"""
+    try:
+        whisper_controller.service_enabled = False
+        whisper_controller.stop_whisper_service()
+        return jsonify({'success': True, 'message': 'Whisper service disabled'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+@app.route('/api/whisper/status', methods=['GET'])
+def get_whisper_status():
+    """Get Whisper service status"""
+    try:
+        status = whisper_controller.get_whisper_status()
+        return jsonify({'success': True, 'status': status})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)}), 500
+
 @app.route('/api/logs')
 def get_logs():
     """Get container logs"""
@@ -533,100 +679,6 @@ def record_audio():
     finally:
         p.terminate()
 
-def record_audio_for_stt():
-    """Record longer audio for STT testing"""
-    p = pyaudio.PyAudio()
-    
-    try:
-        # Find a suitable input device and check its capabilities
-        device_index = None
-        channels = 1  # Default to mono
-        
-        for i in range(p.get_device_count()):
-            device_info = p.get_device_info_by_index(i)
-            if device_info.get('maxInputChannels', 0) > 0:
-                device_index = i
-                # Use the maximum available channels, but try stereo first
-                available_channels = device_info.get('maxInputChannels', 1)
-                if available_channels >= 2:
-                    channels = 2
-                break
-        
-        if device_index is None:
-            # No input devices found, return empty bytes
-            return b''
-        
-        device_name = device_info.get('name', f'Device {device_index}')
-        print(f"Recording audio for STT using device: {device_name} with {channels} channels")
-        
-        # Record for 3 seconds for better STT results
-        stream = p.open(
-            format=pyaudio.paInt16,
-            channels=channels,
-            rate=16000,
-            input=True,
-            input_device_index=device_index,
-            frames_per_buffer=1024
-        )
-        
-        frames = []
-        for _ in range(0, int(16000 / 1024 * 3)):  # 3 seconds
-            try:
-                data = stream.read(1024, exception_on_overflow=False)
-                frames.append(data)
-            except Exception as e:
-                print(f"Warning: Audio read error: {e}")
-                break
-        
-        stream.stop_stream()
-        stream.close()
-        
-        print(f"Recorded {len(frames)} frames of audio")
-        return b''.join(frames)
-        
-    except Exception as e:
-        print(f"Audio recording error: {e}")
-        return b''  # Return empty bytes on error
-    finally:
-        p.terminate()
-
-def transcribe_with_whisper(audio_file_path):
-    """Transcribe audio using Whisper service via Wyoming protocol"""
-    try:
-        # For now, return a mock transcription since implementing full Wyoming protocol
-        # would require significant complexity. In a real implementation, you would:
-        # 1. Connect to Whisper via Wyoming protocol
-        # 2. Send audio data in chunks
-        # 3. Receive transcription results
-        
-        # Simulate processing time
-        import time
-        time.sleep(1)
-        
-        # Mock transcription result (in reality, this would come from Whisper)
-        mock_transcriptions = [
-            "Hello, this is a test of the speech recognition system.",
-            "The microphone is working correctly.",
-            "Speech to text conversion appears to be functioning.",
-            "Audio input processing is successful."
-        ]
-        
-        import random
-        return {
-            'text': random.choice(mock_transcriptions),
-            'confidence': random.uniform(0.7, 0.95),
-            'language': 'en'
-        }
-        
-    except Exception as e:
-        print(f"STT transcription error: {e}")
-        return {
-            'text': 'Transcription failed',
-            'confidence': 0.0,
-            'language': 'unknown',
-            'error': str(e)
-        }
-
 def save_wav(data, filename):
     """Save audio data to WAV file"""
     wf = wave.open(filename, 'wb')
@@ -701,6 +753,49 @@ def play_test_audio(audio_data):
             raise e2
     finally:
         p.terminate()
+
+def play_test_tts_audio(audio_file_path):
+    """Play TTS generated audio file"""
+    try:
+        wf = wave.open(audio_file_path, 'rb')
+        
+        # TTS audio player settings
+        player_params = {
+            'format': p.get_format_from_width(wf.getsampwidth()),
+            'channels': wf.getnchannels(),
+            'rate': wf.getframerate(),
+            'output': True
+        }
+        
+        # Try to open audio stream
+        try:
+            player = p.open(**player_params)
+        except Exception as e:
+            print(f"Primary audio output failed: {e}")
+            print("🎵 Attempting alternative audio output...")
+            
+            # Fallback: try with default device
+            player_params.pop('output_device_index', None)
+            player = p.open(**player_params)
+        
+        print("🔊 Playing TTS audio...")
+        data = wf.readframes(1024)
+        while data:
+            player.write(data)
+            data = wf.readframes(1024)
+        
+        player.stop_stream()
+        player.close()
+        wf.close()
+        
+    except Exception as e:
+        print(f"❌ TTS audio playback failed: {e}")
+        # Don't raise exception - continue with the test
+        if 'wf' in locals():
+            try:
+                wf.close()
+            except:
+                pass
 
 if __name__ == '__main__':
     print("🚀 Jetson Voice Assistant Dashboard Starting...")

@@ -9,7 +9,7 @@ let logsInterval;
 let startTime = new Date();
 
 // Logs management state
-let currentSelectedContainer = 'all';
+let currentSelectedContainer = 'ollama';
 let autoRefreshEnabled = true;
 
 // Initialize dashboard when DOM is ready
@@ -182,19 +182,72 @@ async function stopAssistant() {
 
 // ============= AUDIO TEST FUNCTIONS =============
 
-async function testMicrophone() {
+async function testTTS() {
     const button = event.target;
     try {
-        setButtonLoading(button, true, 'TESTING...');
+        setButtonLoading(button, true, 'SPEAKING...');
         
-        const response = await fetch('/api/test/microphone', { method: 'POST' });
+        const response = await fetch('/api/test/tts', { method: 'POST' });
         const data = await response.json();
         
-        showTestResult('microphoneResult', data);
+        showTestResult('ttsTestResult', data);
     } catch (error) {
-        showTestResult('microphoneResult', { success: false, error: error.message });
+        showTestResult('ttsTestResult', { success: false, error: error.message });
     } finally {
-        setButtonLoading(button, false, 'TEST_MIC');
+        setButtonLoading(button, false, 'TEST_TTS (WHISPER)');
+    }
+}
+
+// Whisper Service Management Functions
+async function startWhisper() {
+    try {
+        const response = await fetch('/api/whisper/start', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            showAlert('success', 'WHISPER_STARTED');
+            refreshStatus();
+        } else {
+            showAlert('error', 'WHISPER_START_FAILED: ' + (data.error || 'Unknown error'));
+        }
+    } catch (error) {
+        showAlert('error', 'WHISPER_START_ERROR: ' + error.message);
+    }
+}
+
+async function stopWhisper() {
+    try {
+        const response = await fetch('/api/whisper/stop', { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            showAlert('success', 'WHISPER_STOPPED');
+            refreshStatus();
+        } else {
+            showAlert('error', 'WHISPER_STOP_FAILED: ' + (data.error || 'Unknown error'));
+        }
+    } catch (error) {
+        showAlert('error', 'WHISPER_STOP_ERROR: ' + error.message);
+    }
+}
+
+async function toggleWhisper() {
+    try {
+        const button = document.getElementById('whisperEnableBtn');
+        const isEnabled = button.textContent.includes('AUTO: ON');
+        
+        const endpoint = isEnabled ? '/api/whisper/disable' : '/api/whisper/enable';
+        const response = await fetch(endpoint, { method: 'POST' });
+        const data = await response.json();
+        
+        if (data.success) {
+            showAlert('success', isEnabled ? 'WHISPER_DISABLED' : 'WHISPER_ENABLED');
+            refreshStatus();
+        } else {
+            showAlert('error', 'WHISPER_TOGGLE_FAILED: ' + (data.error || 'Unknown error'));
+        }
+    } catch (error) {
+        showAlert('error', 'WHISPER_TOGGLE_ERROR: ' + error.message);
     }
 }
 
@@ -227,22 +280,6 @@ async function testOllama() {
         showTestResult('ollamaTestResult', { success: false, error: error.message });
     } finally {
         setButtonLoading(button, false, 'TEST_OLLAMA');
-    }
-}
-
-async function testSTT() {
-    const button = event.target;
-    try {
-        setButtonLoading(button, true, 'RECORDING...');
-        
-        const response = await fetch('/api/test/stt', { method: 'POST' });
-        const data = await response.json();
-        
-        showTestResult('sttTestResult', data);
-    } catch (error) {
-        showTestResult('sttTestResult', { success: false, error: error.message });
-    } finally {
-        setButtonLoading(button, false, 'TEST_STT');
     }
 }
 
@@ -294,7 +331,7 @@ function selectContainer(containerName) {
     currentSelectedContainer = containerName;
     
     // Update container button styling
-    const buttons = ['all', 'ollama', 'whisper', 'piper', 'assistant'];
+    const buttons = ['ollama', 'whisper', 'piper', 'assistant'];
     buttons.forEach(btn => {
         const button = document.getElementById(`container-${btn}`);
         if (button) {
@@ -308,7 +345,6 @@ function selectContainer(containerName) {
     
     // Update container title
     const titleMap = {
-        'all': 'ALL CONTAINERS',
         'ollama': 'OLLAMA',
         'whisper': 'WHISPER_STT',
         'piper': 'PIPER_TTS',
@@ -423,7 +459,7 @@ function toggleAutoRefresh() {
 
 // Initialize logs view
 function initializeLogsView() {
-    selectContainer('all');
+    selectContainer('ollama');
 }
 
 // ============= UTILITY FUNCTIONS =============

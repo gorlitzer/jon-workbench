@@ -77,6 +77,14 @@ services:
       - ALSA_MIXER_DEVICE=${ALSA_MIXER_DEVICE}
     # Remove host networking - use default bridge networking
     # This allows proper container-to-container communication
+    develop:
+      watch:
+        - action: sync
+          path: ./assistant.py
+          target: /app/assistant.py
+        - action: sync
+          path: ./static
+          target: /app/static
 
   dashboard:
     build: .
@@ -93,6 +101,7 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./templates:/app/templates:ro
+      - ./static:/app/static:ro
     environment:
       - FLASK_ENV=${FLASK_ENV}
       - PYTHONPATH=${PYTHONPATH}
@@ -110,6 +119,17 @@ services:
       - /dev/snd:/dev/snd
     group_add:
       - "audio"
+    develop:
+      watch:
+        - action: sync
+          path: ./web_dashboard.py
+          target: /app/web_dashboard.py
+        - action: sync
+          path: ./static
+          target: /app/static
+        - action: sync
+          path: ./templates
+          target: /app/templates
 
 volumes:
   ollama_data:
