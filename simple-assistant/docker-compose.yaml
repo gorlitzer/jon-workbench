@@ -1,0 +1,63 @@
+# docker-compose.yml - Mac Docker Desktop with native audio support
+
+services:
+  ollama:
+    image: ollama/ollama:0.5.7
+    container_name: ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+      - ./ollama-entrypoint.sh:/entrypoint.sh:ro
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - OLLAMA_KEEP_ALIVE=5m0s
+      - OLLAMA_MAX_LOADED_MODELS=2
+      - OLLAMA_NUM_PARALLEL=1
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  whisper:
+    image: rhasspy/wyoming-whisper
+    container_name: whisper
+    restart: unless-stopped
+    ports:
+      - "10300:10300"
+    command: --model base --language en
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+
+  piper:
+    image: rhasspy/wyoming-piper
+    container_name: piper
+    restart: unless-stopped
+    ports:
+      - "10200:10200"
+    command: --voice en_US-lessac-medium
+
+  assistant:
+    build: .
+    container_name: voice-assistant
+    restart: unless-stopped
+    depends_on:
+      - ollama
+      - whisper
+      - piper
+    # Mac Docker Desktop - rely on built-in audio forwarding
+    volumes:
+      - /tmp/.asoundrc:/root/.asoundrc:ro
+    environment:
+      - OLLAMA_HOST=ollama:11434
+      - WHISPER_HOST=whisper:10300
+      - PIPER_HOST=piper:10200
+      # Mac Docker Desktop audio environment
+      - AUDIODEV=default
+      - PYTHONPATH=/usr/local/lib/python3.11/site-packages
+      # Let Docker Desktop handle audio routing
+      - PULSE_SERVER=unix:${HOME}/.config/pulse/native
+      - XDG_RUNTIME_DIR=${HOME}/.config/pulse
+    network_mode: host
+    # Docker Desktop automatically bridges audio on macOS
+
+volumes:
+  ollama_data:

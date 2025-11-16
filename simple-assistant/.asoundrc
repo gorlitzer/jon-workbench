@@ -1,0 +1,49 @@
+# ALSA configuration for Mac Docker Desktop audio
+# This bridges to Docker Desktop's built-in audio system
+
+# Default configuration for Docker Desktop audio
+pcm.!default {
+    type plug
+    slave.pcm "pulse"
+}
+
+# PulseAudio configuration (Docker Desktop will bridge this)
+pcm.pulse {
+    type pulse
+    hint {
+        show on
+        description "PulseAudio"
+    }
+}
+
+# ALSA fallback for direct hardware access
+pcm.hw {
+    type hw
+    card 0
+    device 0
+}
+
+# Default device that Docker Desktop audio will handle
+pcm.default {
+    type plug
+    slave {
+        pcm "hw:0,0"
+        rate 44100
+        channels 2
+        format S16_LE
+    }
+}
+
+# Additional devices that Docker Desktop might expose
+pcm.dmix {
+    type dmix
+    ipc_key 1
+    ipc_perm 0666
+    slave {
+        pcm "hw:0,0"
+        rate 44100
+        channels 2
+        buffer_size 4096
+        period_size 2048
+    }
+}
