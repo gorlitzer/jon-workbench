@@ -26,7 +26,7 @@ services:
     image: rhasspy/wyoming-whisper
     container_name: whisper
     restart: unless-stopped
-    runtime: nvidia
+    # runtime: nvidia
     ports:
       - "10300:10300"
     command: --model ${WHISPER_MODEL} --language ${WHISPER_LANGUAGE}

@@ -457,9 +457,17 @@ def test_speaker():
 
 @app.route('/api/test/ollama', methods=['POST'])
 def test_ollama():
-    """Test Ollama connectivity with detailed feedback"""
+    """Interactive chat with Ollama with detailed feedback"""
     start_time = time.time()
     try:
+        # Get user input from request
+        user_data = request.get_json() or {}
+        
+        user_message = user_data.get('message', 'Hello! Please introduce yourself and tell me about your capabilities.')
+        model_name = user_data.get('model', 'qwen2.5:0.5b')
+        
+        print(f"🔍 DEBUG: Starting Ollama test - User: '{user_message}', Model: '{model_name}'")
+        
         # Test Ollama API connectivity
         api_start = time.time()
         response = requests.get('http://ollama:11434/api/tags', timeout=5)
@@ -468,49 +476,83 @@ def test_ollama():
         api_time = api_end - api_start
         
         models_data = response.json().get('models', [])
-        models = [model['name'] for model in models_data]
+        available_models = [model['name'] for model in models_data]
         
-        # Test AI response with detailed timing
+        print(f"🔍 DEBUG: Available models: {available_models}")
+        
+        # Use requested model or fall back to first available
+        if model_name not in available_models:
+            if available_models:
+                model_name = available_models[0]
+                print(f"🔍 DEBUG: Model '{user_data.get('model')}' not available, using '{model_name}'")
+            else:
+                model_name = 'qwen2.5:0.5b'  # Default fallback
+                print(f"🔍 DEBUG: No models available, using default '{model_name}'")
+        
+        # Generate AI response with detailed timing
         ai_start = time.time()
-        test_response = requests.post('http://ollama:11434/api/generate', json={
-            'model': 'qwen2.5:0.5b',
-            'prompt': 'Hello! Please respond briefly.',
-            'stream': False
-        }, timeout=30)
+        print(f"🔍 DEBUG: Sending API request to Ollama...")
         
+        test_response = requests.post('http://ollama:11434/api/generate', json={
+            'model': model_name,
+            'prompt': user_message,
+            'stream': False,
+            'options': {
+                'temperature': 0.7,
+                'top_p': 0.9,
+                'repeat_last_n': 64,
+                'repeat_penalty': 1.1
+            }
+        }, timeout=60)  # Increased timeout for longer conversations
+        
+        print(f"🔍 DEBUG: API response received, status: {test_response.status_code}")
         test_response.raise_for_status()
-        ai_end = time.time()
-        ai_time = ai_end - ai_start
         
         ai_response_data = test_response.json()
         ai_response = ai_response_data.get('response', '')
         
+        print(f"🔍 DEBUG: Got AI response: {len(ai_response)} chars")
+        print(f"🔍 DEBUG: Response preview: '{ai_response[:100]}...'")
+        
         # Calculate response statistics
         response_text = ai_response.strip()
-        word_count = len(response_text.split()) if response_text else 0
-        char_count = len(response_text)
+        user_word_count = len(user_message.split()) if user_message else 0
+        ai_word_count = len(response_text.split()) if response_text else 0
+        user_char_count = len(user_message)
+        ai_char_count = len(response_text)
         prompt_tokens = ai_response_data.get('prompt_eval_count', 0)
         response_tokens = ai_response_data.get('eval_count', 0)
         total_tokens = prompt_tokens + response_tokens
         eval_duration = ai_response_data.get('eval_duration', 0) / 1000000000  # Convert nanoseconds to seconds
+        ai_end = time.time()
+        ai_time = ai_end - ai_start
         
         end_time = time.time()
         total_execution_time = end_time - start_time
         
+        print(f"🤖 AI ({model_name}): {response_text}")
+        
         return jsonify({
             'success': True,
-            'message': 'Ollama test completed successfully',
+            'message': 'Interactive chat completed successfully',
             'execution_time': round(total_execution_time, 3),
-            'models': models,
-            'test_response': response_text,
+            'chat_session': {
+                'user_message': user_message,
+                'ai_response': response_text,
+                'model_used': model_name,
+                'conversation_turns': 1
+            },
             'ai_stats': {
-                'word_count': word_count,
-                'character_count': char_count,
+                'user_word_count': user_word_count,
+                'user_character_count': user_char_count,
+                'ai_word_count': ai_word_count,
+                'ai_character_count': ai_char_count,
                 'prompt_tokens': prompt_tokens,
                 'response_tokens': response_tokens,
                 'total_tokens': total_tokens,
                 'tokens_per_second': round(response_tokens / eval_duration, 2) if eval_duration > 0 else 0,
-                'response_quality': 'Good' if word_count >= 3 and response_text else 'Poor'
+                'response_quality': 'Good' if ai_word_count >= 3 and response_text else 'Poor',
+                'conversation_length': 'Extended' if ai_word_count > 20 else 'Brief' if ai_word_count > 5 else 'Minimal'
             },
             'timing_breakdown': {
                 'api_check_time': round(api_time, 3),
@@ -519,20 +561,80 @@ def test_ollama():
                 'total_time': round(total_execution_time, 3)
             },
             'model_info': {
-                'tested_model': 'qwen2.5:0.5b',
-                'available_models': len(models),
-                'model_sizes': [model.get('size', 'Unknown') for model in models_data[:3]]  # First 3 models
+                'tested_model': model_name,
+                'available_models': len(available_models),
+                'model_sizes': [model.get('size', 'Unknown') for model in models_data[:3]]
             },
-            'generated_message': f'Generated {word_count} words ({response_tokens} tokens) in {ai_time:.2f}s using {models[0] if models else "Unknown model"}'
+            'generated_message': f'Chat session: {user_word_count} user words → {ai_word_count} AI words ({response_tokens} tokens) in {ai_time:.2f}s using {model_name}'
         })
+        
+    except requests.exceptions.Timeout as e:
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"⏰ DEBUG: Timeout error: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Request timeout: {str(e)}',
+            'execution_time': round(execution_time, 3),
+            'timing_breakdown': {
+                'total_time': round(execution_time, 3)
+            }
+        }), 408
+        
+    except requests.exceptions.ConnectionError as e:
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"🔌 DEBUG: Connection error: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'Connection error: {str(e)}',
+            'execution_time': round(execution_time, 3),
+            'timing_breakdown': {
+                'total_time': round(execution_time, 3)
+            }
+        }), 503
+        
+    except requests.exceptions.HTTPError as e:
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"🌐 DEBUG: HTTP error: {e}")
+        print(f"🌐 DEBUG: Response content: {e.response.text if hasattr(e, 'response') else 'No response'}")
+        return jsonify({
+            'success': False,
+            'error': f'HTTP error: {str(e)}',
+            'execution_time': round(execution_time, 3),
+            'timing_breakdown': {
+                'total_time': round(execution_time, 3)
+            }
+        }), e.response.status_code if hasattr(e, 'response') else 500
+        
+    except json.JSONDecodeError as e:
+        end_time = time.time()
+        execution_time = end_time - start_time
+        print(f"📄 DEBUG: JSON decode error: {e}")
+        return jsonify({
+            'success': False,
+            'error': f'JSON decode error: {str(e)}',
+            'execution_time': round(execution_time, 3),
+            'timing_breakdown': {
+                'total_time': round(execution_time, 3)
+            }
+        }), 502
         
     except Exception as e:
         end_time = time.time()
         execution_time = end_time - start_time
+        print(f"💥 DEBUG: Unexpected error: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({
             'success': False,
-            'error': str(e),
+            'error': f'Unexpected error: {str(e)}',
             'execution_time': round(execution_time, 3),
+            'debug_info': {
+                'error_type': type(e).__name__,
+                'error_location': traceback.format_exc()
+            },
             'timing_breakdown': {
                 'total_time': round(execution_time, 3)
             }

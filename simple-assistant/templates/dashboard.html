@@ -197,8 +197,22 @@
             
             <!-- AI Testing -->
             <div class="hacker-box p-6">
-                <h2 class="text-xl font-bold terminal-text mb-6">[ AI_TESTS ]</h2>
-                <button class="w-full bg-transparent border border-yellow-400 text-yellow-400 px-6 py-3 terminal-text hover:bg-yellow-400 hover:text-black mb-4" onclick="testOllama()">TEST_OLLAMA</button>
+                <h2 class="text-xl font-bold terminal-text mb-6">[ AI_CHAT ]</h2>
+                <div class="mb-4">
+                    <label class="terminal-text text-sm mb-2 block">MESSAGE:</label>
+                    <textarea id="chatMessage" class="w-full h-20 bg-black border border-gray-600 text-green-400 terminal-text px-3 py-2 text-sm resize-none"
+                              placeholder="Type your message to the AI assistant...">Hello! Please introduce yourself and tell me about your capabilities.</textarea>
+                </div>
+                <div class="mb-4">
+                    <label class="terminal-text text-sm mb-2 block">MODEL:</label>
+                    <select id="chatModel" class="w-full bg-black border border-gray-600 text-green-400 terminal-text px-3 py-2 text-sm">
+                        <option value="qwen2.5:0.5b">qwen2.5:0.5b (Recommended)</option>
+                        <option value="qwen2.5:1.5b">qwen2.5:1.5b (High Quality)</option>
+                        <option value="llama3.2:1b">llama3.2:1b (Medium)</option>
+                        <option value="phi3:mini">phi3:mini (Lightweight)</option>
+                    </select>
+                </div>
+                <button class="w-full bg-transparent border border-yellow-400 text-yellow-400 px-6 py-3 terminal-text hover:bg-yellow-400 hover:text-black mb-4" onclick="testOllama()">SEND_CHAT</button>
                 <div class="test-result hidden terminal-text" id="ollamaTestResult"></div>
             </div>
         </div>

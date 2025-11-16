@@ -270,16 +270,33 @@ async function testSpeaker() {
 async function testOllama() {
     const button = event.target;
     try {
-        setButtonLoading(button, true, 'TESTING...');
+        setButtonLoading(button, true, 'CHATTING...');
         
-        const response = await fetch('/api/test/ollama', { method: 'POST' });
+        // Get user input values
+        const messageElement = document.getElementById('chatMessage');
+        const modelElement = document.getElementById('chatModel');
+        
+        const userMessage = messageElement ? messageElement.value : 'Hello! Please introduce yourself.';
+        const selectedModel = modelElement ? modelElement.value : 'qwen2.5:0.5b';
+        
+        // Send chat request with user input
+        const response = await fetch('/api/test/ollama', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+                message: userMessage,
+                model: selectedModel
+            })
+        });
+        
         const data = await response.json();
-        
         showTestResult('ollamaTestResult', data);
     } catch (error) {
         showTestResult('ollamaTestResult', { success: false, error: error.message });
     } finally {
-        setButtonLoading(button, false, 'TEST_OLLAMA');
+        setButtonLoading(button, false, 'SEND_CHAT');
     }
 }
 
@@ -495,14 +512,23 @@ function showTestResult(elementId, result) {
         `;
         
         // AI Test Results
+        if (result.chat_session && result.chat_session.ai_response) {
+            output += `<div class="mt-2 text-yellow-400"><strong>AI_RESPONSE:</strong><br>"${escapeHtml(result.chat_session.ai_response)}"</div>`;
+        }
         if (result.test_response) {
             output += `<div class="mt-2 text-yellow-400"><strong>AI_RESPONSE:</strong><br>"${escapeHtml(result.test_response)}"</div>`;
         }
         if (result.ai_stats) {
             const stats = result.ai_stats;
+            // Handle both old (word_count) and new (ai_word_count) field names for compatibility
+            const wordCount = stats.word_count !== undefined ? stats.word_count : stats.ai_word_count;
+            const totalTokens = stats.total_tokens || 0;
+            const tokensPerSecond = stats.tokens_per_second || 0;
+            const responseQuality = stats.response_quality || 'Unknown';
+            
             output += `<div class="mt-2 text-blue-400"><strong>AI_STATS:</strong><br>
-                WORDS: ${stats.word_count} | TOKENS: ${stats.total_tokens} | TPS: ${stats.tokens_per_second}<br>
-                QUALITY: ${stats.response_quality}
+                WORDS: ${wordCount || 'undefined'} | TOKENS: ${totalTokens} | TPS: ${tokensPerSecond}<br>
+                QUALITY: ${responseQuality}
             </div>`;
         }
         
